@@ -57,7 +57,7 @@ def get_updates():
         print("Update error:", e)
         return []
 
-# ===== MARKET (WITH RETRY + BACKOFF) =====
+# ===== MARKET =====
 def get_market():
     url = "https://api.coingecko.com/api/v3/coins/markets"
     params = {
@@ -67,7 +67,7 @@ def get_market():
         "page": 1
     }
 
-    for attempt in range(3):
+    for _ in range(3):
         try:
             res = requests.get(url, params=params, timeout=15)
 
@@ -80,15 +80,23 @@ def get_market():
                 print("⚠️ Rate limited, waiting...")
                 time.sleep(30)
 
-            else:
-                print("API error:", res.status_code)
-
         except Exception as e:
-            print("Request error:", e)
+            print("Market error:", e)
 
         time.sleep(5)
 
     return []
+
+def get_cached_market():
+    global market_cache, market_cache_time
+
+    now = time.time()
+
+    if now - market_cache_time > 60:
+        market_cache = get_market()
+        market_cache_time = now
+
+    return market_cache
 
 # ===== ANALYSIS =====
 def analyze(coins):
@@ -114,7 +122,6 @@ def analyze(coins):
 
             score = 0
 
-            # momentum scoring
             if change > 5:
                 score += 1
             if change > 10:
@@ -134,9 +141,32 @@ def analyze(coins):
             if change > 30:
                 score -= 2
 
+            # ===== FILTER =====
             if mode == "safe" and score < 5: continue
-            if mode == "balanced" and score < 4: continue
-            if mode == "aggressive" and score < 3: continue
+            if mode == "balanced" and score < 3: continue
+            if mode == "aggressive" and score < 2: continue
+
+            # ===== TAG =====
+            tag = "👀 WATCHLIST"
+            if score >= 5:
+                tag = "🚀 VERY STRONG"
+            elif score >= 4:
+                tag = "🔥 STRONG"
+
+            # ===== DECISION =====
+            decision = "🟡 WAIT"
+
+            if change < 5 and vol_jump > 10:
+                decision = "🟢 EARLY ENTRY"
+
+            elif 5 <= change <= 15:
+                decision = "🟢 MOMENTUM"
+
+            elif change > 20:
+                decision = "🔴 OVEREXTENDED"
+
+            elif vol_jump > 20 and change < 3:
+                decision = "👀 ACCUMULATION"
 
             results.append({
                 "id": cid,
@@ -144,7 +174,9 @@ def analyze(coins):
                 "symbol": sym,
                 "price": price,
                 "change": change,
-                "score": score
+                "score": score,
+                "tag": tag,
+                "decision": decision
             })
 
             last_price[cid] = price
@@ -159,15 +191,17 @@ def analyze(coins):
 # ===== FORMAT =====
 def format_signals(signals):
     if not signals:
-        return "No signals"
+        return None
 
-    msg = "🚀 SIGNALS\n\n"
+    msg = "🚀 MARKET SIGNALS\n\n"
 
     for s in signals[:5]:
         conf = min(100, int((s["score"]/7)*100))
 
+        msg += f"{s['tag']}\n"
         msg += f"{s['name']} ({s['symbol']})\n"
         msg += f"${s['price']} | {s['change']:.2f}%\n"
+        msg += f"{s['decision']}\n"
         msg += f"Confidence: {conf}%\n\n"
 
     return msg
@@ -182,15 +216,23 @@ def handle(text, chat_id):
         send("Bot ready 🚀", chat_id)
 
     elif text == "/scan":
-        send(format_signals(analyze(get_cached_market())), chat_id)
+        result = format_signals(analyze(get_cached_market()))
+        if result:
+            send(result, chat_id)
+        else:
+            send("😴 Market quiet right now.", chat_id)
 
     elif text == "/top":
-        send(format_signals(analyze(get_cached_market())[:5]), chat_id)
+        result = format_signals(analyze(get_cached_market())[:5])
+        if result:
+            send(result, chat_id)
+        else:
+            send("No strong coins right now.", chat_id)
 
     elif text.startswith("/mode"):
         if len(parts) > 1:
             mode = parts[1]
-            send(f"Mode: {mode}", chat_id)
+            send(f"Mode set to {mode}", chat_id)
 
     elif text == "/pause":
         paused = True
@@ -199,18 +241,6 @@ def handle(text, chat_id):
     elif text == "/resume":
         paused = False
         send("Resumed", chat_id)
-
-# ===== CACHE WRAPPER =====
-def get_cached_market():
-    global market_cache, market_cache_time
-
-    now = time.time()
-
-    if now - market_cache_time > 60:
-        market_cache = get_market()
-        market_cache_time = now
-
-    return market_cache
 
 # ===== MAIN LOOP =====
 print("BOT RUNNING...")
