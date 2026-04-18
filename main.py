@@ -3,17 +3,18 @@ import time
 import os
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = str(os.getenv("CHAT_ID"))
 
-if not BOT_TOKEN or not CHAT_ID:
-    print("Missing BOT_TOKEN or CHAT_ID")
+if not BOT_TOKEN:
+    print("Missing BOT_TOKEN")
     exit()
 
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# ===== SETTINGS =====
-mode = "meme"        # meme / safe
-risk = "medium"      # low / medium / high
+# ===== GLOBAL STATE =====
+users = set()
+
+mode = "meme"
+risk = "medium"
 paused = False
 cooldown = 300
 
@@ -25,11 +26,18 @@ last_alert_time = {}
 last_update_id = None
 
 # ===== TELEGRAM =====
-def send(msg):
-    requests.post(f"{BASE_URL}/sendMessage", data={
-        "chat_id": CHAT_ID,
-        "text": msg
-    })
+def send(msg, chat_id):
+    try:
+        requests.post(f"{BASE_URL}/sendMessage", data={
+            "chat_id": chat_id,
+            "text": msg
+        }, timeout=10)
+    except:
+        pass
+
+def broadcast(msg):
+    for user in users:
+        send(msg, user)
 
 def get_updates():
     global last_update_id
@@ -53,7 +61,26 @@ def get_market():
     }
     return requests.get(url, params=params).json()
 
-# ===== SIGNAL ENGINE =====
+# ===== SIGNAL LOGIC =====
+def classify(change, price_jump, vol_jump, volume):
+    entry = "MID"
+    risk_flag = "LOW"
+    action = "WATCH"
+
+    if 3 < change < 12 and price_jump > 1 and vol_jump > 10:
+        entry = "EARLY"
+        action = "CONSIDER ENTRY"
+
+    elif change > 20:
+        entry = "LATE"
+        risk_flag = "HIGH"
+        action = "WAIT"
+
+    if volume < 1_000_000:
+        risk_flag = "LOW VOLUME"
+
+    return entry, risk_flag, action
+
 def analyze(coins):
     results = []
 
@@ -70,7 +97,6 @@ def analyze(coins):
             if not price or not vol:
                 continue
 
-            # MODE FILTER
             if mode == "meme" and mc > 5_000_000_000:
                 continue
             if mode == "safe" and mc < 1_000_000_000:
@@ -93,7 +119,6 @@ def analyze(coins):
             if price_jump > 2: score += 1
             if vol_jump > 25: score += 1
 
-            # RISK FILTER
             if risk == "low" and score < 4:
                 continue
             if risk == "medium" and score < 3:
@@ -106,6 +131,8 @@ def analyze(coins):
                 "price": price,
                 "change": change,
                 "volume": vol,
+                "price_jump": price_jump,
+                "vol_jump": vol_jump,
                 "score": score
             })
 
@@ -117,20 +144,50 @@ def analyze(coins):
 
     return sorted(results, key=lambda x: x["score"], reverse=True)
 
-# ===== COMMAND HANDLER =====
-def handle_command(text):
+# ===== FORMAT =====
+def format_signals(signals):
+    if not signals:
+        return "No signals"
+
+    msg = "🚀 SMART SIGNALS\n\n"
+
+    for s in signals[:5]:
+        entry, risk_flag, action = classify(
+            s["change"],
+            s["price_jump"],
+            s["vol_jump"],
+            s["volume"]
+        )
+
+        msg += f"{s['name']} ({s['symbol']})\n"
+        msg += f"💰 ${s['price']}\n"
+        msg += f"📈 {s['change']:.2f}%\n"
+        msg += f"📊 Vol: ${s['volume']:,}\n\n"
+
+        msg += f"🎯 Entry: {entry}\n"
+        msg += f"⚠️ Risk: {risk_flag}\n"
+        msg += f"📊 Action: {action}\n"
+        msg += f"⭐ Score: {s['score']}\n\n"
+
+    return msg
+
+# ===== COMMANDS =====
+def handle_command(text, chat_id):
     global mode, risk, paused, cooldown
 
     parts = text.lower().split()
 
-    if text == "/scan":
+    if text == "/start":
+        send("Bot activated 🚀", chat_id)
+
+    elif text == "/scan":
         coins = get_market()
         signals = analyze(coins)
-        send(format_signals(signals))
+        send(format_signals(signals), chat_id)
 
     elif text.startswith("/coin"):
         if len(parts) < 2:
-            send("Usage: /coin btc")
+            send("Usage: /coin btc", chat_id)
             return
 
         target = parts[1]
@@ -138,85 +195,69 @@ def handle_command(text):
 
         for c in coins:
             if c["symbol"] == target or c["id"] == target:
-                send(f"{c['name']} (${c['current_price']})\n24h: {c['price_change_percentage_24h']:.2f}%")
+                send(f"{c['name']} ${c['current_price']}\n24h: {c['price_change_percentage_24h']:.2f}%", chat_id)
                 return
 
-        send("Coin not found")
+        send("Coin not found", chat_id)
 
     elif text.startswith("/add"):
-        if len(parts) < 2:
-            return
+        if len(parts) < 2: return
         watchlist.add(parts[1])
-        send(f"Added {parts[1]}")
+        send("Added", chat_id)
 
     elif text.startswith("/remove"):
-        if len(parts) < 2:
-            return
+        if len(parts) < 2: return
         watchlist.discard(parts[1])
-        send(f"Removed {parts[1]}")
+        send("Removed", chat_id)
 
     elif text == "/list":
-        send("Watchlist:\n" + "\n".join(watchlist) if watchlist else "Empty")
+        send("\n".join(watchlist) or "Empty", chat_id)
 
     elif text.startswith("/mode"):
-        if len(parts) < 2:
-            return
+        if len(parts) < 2: return
         mode = parts[1]
-        send(f"Mode set to {mode}")
+        send(f"Mode: {mode}", chat_id)
 
     elif text.startswith("/risk"):
-        if len(parts) < 2:
-            return
+        if len(parts) < 2: return
         risk = parts[1]
-        send(f"Risk set to {risk}")
-
-    elif text.startswith("/cooldown"):
-        if len(parts) < 2:
-            return
-        cooldown = int(parts[1])
-        send(f"Cooldown set to {cooldown}s")
+        send(f"Risk: {risk}", chat_id)
 
     elif text == "/pause":
         paused = True
-        send("Paused")
+        send("Paused", chat_id)
 
     elif text == "/resume":
         paused = False
-        send("Resumed")
+        send("Resumed", chat_id)
 
     elif text == "/top":
         coins = get_market()
         signals = analyze(coins)
-        send(format_signals(signals[:5]))
-
-# ===== FORMAT =====
-def format_signals(signals):
-    if not signals:
-        return "No signals"
-
-    msg = "🚀 SIGNALS\n\n"
-    for s in signals[:5]:
-        msg += f"{s['name']} ({s['symbol']})\n"
-        msg += f"${s['price']} | {s['change']:.2f}%\n"
-        msg += f"Score: {s['score']}\n\n"
-
-    return msg
+        send(format_signals(signals[:5]), chat_id)
 
 # ===== MAIN LOOP =====
 print("BOT RUNNING...")
 
 while True:
     try:
-        # HANDLE COMMANDS
         updates = get_updates()
+
         for u in updates:
             last_update_id = u["update_id"]
-            text = u.get("message", {}).get("text")
+            message = u.get("message")
 
-            if text and str(u["message"]["chat"]["id"]) == CHAT_ID:
-                handle_command(text)
+            if not message:
+                continue
 
-        # AUTO SIGNALS
+            text = message.get("text")
+            chat_id = str(message["chat"]["id"])
+
+            users.add(chat_id)
+
+            if text:
+                handle_command(text, chat_id)
+
         if not paused:
             coins = get_market()
             signals = analyze(coins)
@@ -229,15 +270,14 @@ while True:
                 if now - last < cooldown:
                     continue
 
-                # watchlist filter
                 if watchlist and s["symbol"].lower() not in watchlist:
                     continue
 
-                send(format_signals([s]))
+                broadcast(format_signals([s]))
                 last_alert_time[s["id"]] = now
 
-        time.sleep(30)
+        time.sleep(10)
 
     except Exception as e:
         print("Error:", e)
-        time.sleep(10)
+        time.sleep(5)
