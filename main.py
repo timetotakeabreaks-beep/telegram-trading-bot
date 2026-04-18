@@ -2,20 +2,18 @@ import requests
 import time
 import os
 
-# ===== SAFE START =====
 print("Starting bot...")
 time.sleep(3)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
-    print("⚠️ BOT_TOKEN missing — waiting instead of crashing")
+    print("⚠️ Missing BOT_TOKEN")
     while True:
         time.sleep(60)
 
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# ===== STATE =====
 users = set()
 mode = "balanced"
 paused = False
@@ -26,7 +24,6 @@ last_volume = {}
 last_alert = {}
 last_update_id = None
 
-# CACHE
 cache = {}
 CACHE_TIME = 60
 
@@ -70,23 +67,47 @@ def get_market():
             "per_page": 50,
             "page": 1
         }
-        return requests.get(url, params=params, timeout=15).json()
+
+        res = requests.get(url, params=params, timeout=15)
+
+        if res.status_code != 200:
+            print("Market API error:", res.status_code)
+            return []
+
+        data = res.json()
+
+        if not isinstance(data, list):
+            print("Market bad data:", data)
+            return []
+
+        return data
+
     except Exception as e:
         print("Market error:", e)
         return []
 
-# ===== RSI =====
-def get_rsi_multi(cid):
+# ===== SAFE RSI =====
+def get_rsi(cid):
     try:
         url = f"https://api.coingecko.com/api/v3/coins/{cid}/market_chart"
-        data = requests.get(url, params={"vs_currency":"usd","days":1}, timeout=15).json()
+        res = requests.get(url, params={"vs_currency":"usd","days":1}, timeout=10)
+        data = res.json()
+
+        if "prices" not in data:
+            return 50
+
         prices = [p[1] for p in data["prices"]]
 
+        if len(prices) < 10:
+            return 50
+
         gains, losses = [], []
-        for i in range(1,len(prices)):
-            diff = prices[i]-prices[i-1]
-            if diff>0: gains.append(diff)
-            else: losses.append(abs(diff))
+        for i in range(1, len(prices)):
+            diff = prices[i] - prices[i-1]
+            if diff > 0:
+                gains.append(diff)
+            else:
+                losses.append(abs(diff))
 
         if not gains or not losses:
             return 50
@@ -96,8 +117,8 @@ def get_rsi_multi(cid):
 
         rs = avg_gain/avg_loss if avg_loss else 0
         return round(100-(100/(1+rs)),2)
-    except Exception as e:
-        print("RSI error:", e)
+
+    except:
         return 50
 
 def cached_rsi(cid):
@@ -105,23 +126,31 @@ def cached_rsi(cid):
     if cid in cache and now - cache[cid]["time"] < CACHE_TIME:
         return cache[cid]["rsi"]
 
-    val = get_rsi_multi(cid)
+    val = get_rsi(cid)
     cache[cid] = {"rsi": val, "time": now}
     return val
 
-# ===== TREND =====
+# ===== SAFE TREND =====
 def get_trend(cid):
     try:
         url = f"https://api.coingecko.com/api/v3/coins/{cid}/market_chart"
-        data = requests.get(url, params={"vs_currency":"usd","days":2}, timeout=15).json()
+        res = requests.get(url, params={"vs_currency":"usd","days":2}, timeout=10)
+        data = res.json()
+
+        if "prices" not in data:
+            return "UNKNOWN"
+
         prices = [p[1] for p in data["prices"]]
+
+        if len(prices) < 50:
+            return "UNKNOWN"
 
         ema20 = sum(prices[-20:])/20
         ema50 = sum(prices[-50:])/50
 
         return "UPTREND" if ema20 > ema50 else "DOWNTREND"
-    except Exception as e:
-        print("Trend error:", e)
+
+    except:
         return "UNKNOWN"
 
 # ===== ANALYSIS =====
@@ -130,14 +159,17 @@ def analyze(coins):
 
     for c in coins:
         try:
-            cid = c["id"]
-            name = c["name"]
-            sym = c["symbol"].upper()
-            price = c["current_price"]
-            volume = c["total_volume"]
-            change = c["price_change_percentage_24h"] or 0
+            if not isinstance(c, dict):
+                continue
 
-            if not price or not volume:
+            cid = c.get("id")
+            name = c.get("name")
+            sym = c.get("symbol", "").upper()
+            price = c.get("current_price")
+            volume = c.get("total_volume")
+            change = c.get("price_change_percentage_24h") or 0
+
+            if not cid or not price or not volume:
                 continue
 
             rsi = cached_rsi(cid)
@@ -175,7 +207,6 @@ def analyze(coins):
                 "symbol": sym,
                 "price": price,
                 "change": change,
-                "volume": volume,
                 "score": score,
                 "rsi": rsi,
                 "trend": trend
@@ -183,6 +214,8 @@ def analyze(coins):
 
             last_price[cid] = price
             last_volume[cid] = volume
+
+            time.sleep(0.2)  # prevent API spam
 
         except Exception as e:
             print("Analyze error:", e)
@@ -196,12 +229,15 @@ def format_signals(signals):
         return "No signals"
 
     msg = "🚀 SIGNALS\n\n"
+
     for s in signals[:5]:
         conf = min(100, int((s["score"]/7)*100))
+
         msg += f"{s['name']} ({s['symbol']})\n"
         msg += f"${s['price']} | {s['change']:.2f}%\n"
         msg += f"RSI: {s['rsi']} | {s['trend']}\n"
         msg += f"Confidence: {conf}%\n\n"
+
     return msg
 
 # ===== COMMANDS =====
@@ -220,7 +256,7 @@ def handle(text, chat_id):
         send(format_signals(analyze(get_market())[:5]), chat_id)
 
     elif text.startswith("/mode"):
-        if len(parts)>1:
+        if len(parts) > 1:
             mode = parts[1]
             send(f"Mode: {mode}", chat_id)
 
