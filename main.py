@@ -8,7 +8,7 @@ time.sleep(3)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
-    print("⚠️ Missing BOT_TOKEN")
+    print("Missing BOT_TOKEN")
     while True:
         time.sleep(60)
 
@@ -24,9 +24,6 @@ last_volume = {}
 last_alert = {}
 last_update_id = None
 
-cache = {}
-CACHE_TIME = 60
-
 history = []
 
 # ===== TELEGRAM =====
@@ -36,8 +33,8 @@ def send(msg, chat_id):
             "chat_id": chat_id,
             "text": msg
         }, timeout=10)
-    except Exception as e:
-        print("Send error:", e)
+    except:
+        pass
 
 def broadcast(msg):
     for u in users:
@@ -51,10 +48,8 @@ def get_updates():
         if last_update_id:
             params["offset"] = last_update_id + 1
 
-        res = requests.get(url, params=params, timeout=15).json()
-        return res.get("result", [])
-    except Exception as e:
-        print("Update error:", e)
+        return requests.get(url, params=params, timeout=15).json().get("result", [])
+    except:
         return []
 
 # ===== MARKET =====
@@ -67,91 +62,19 @@ def get_market():
             "per_page": 50,
             "page": 1
         }
-
         res = requests.get(url, params=params, timeout=15)
 
         if res.status_code != 200:
-            print("Market API error:", res.status_code)
             return []
 
         data = res.json()
-
         if not isinstance(data, list):
-            print("Market bad data:", data)
             return []
 
         return data
 
-    except Exception as e:
-        print("Market error:", e)
+    except:
         return []
-
-# ===== SAFE RSI =====
-def get_rsi(cid):
-    try:
-        url = f"https://api.coingecko.com/api/v3/coins/{cid}/market_chart"
-        res = requests.get(url, params={"vs_currency":"usd","days":1}, timeout=10)
-        data = res.json()
-
-        if "prices" not in data:
-            return 50
-
-        prices = [p[1] for p in data["prices"]]
-
-        if len(prices) < 10:
-            return 50
-
-        gains, losses = [], []
-        for i in range(1, len(prices)):
-            diff = prices[i] - prices[i-1]
-            if diff > 0:
-                gains.append(diff)
-            else:
-                losses.append(abs(diff))
-
-        if not gains or not losses:
-            return 50
-
-        avg_gain = sum(gains)/len(gains)
-        avg_loss = sum(losses)/len(losses)
-
-        rs = avg_gain/avg_loss if avg_loss else 0
-        return round(100-(100/(1+rs)),2)
-
-    except:
-        return 50
-
-def cached_rsi(cid):
-    now = time.time()
-    if cid in cache and now - cache[cid]["time"] < CACHE_TIME:
-        return cache[cid]["rsi"]
-
-    val = get_rsi(cid)
-    cache[cid] = {"rsi": val, "time": now}
-    return val
-
-# ===== SAFE TREND =====
-def get_trend(cid):
-    try:
-        url = f"https://api.coingecko.com/api/v3/coins/{cid}/market_chart"
-        res = requests.get(url, params={"vs_currency":"usd","days":2}, timeout=10)
-        data = res.json()
-
-        if "prices" not in data:
-            return "UNKNOWN"
-
-        prices = [p[1] for p in data["prices"]]
-
-        if len(prices) < 50:
-            return "UNKNOWN"
-
-        ema20 = sum(prices[-20:])/20
-        ema50 = sum(prices[-50:])/50
-
-        return "UPTREND" if ema20 > ema50 else "DOWNTREND"
-
-    except:
-        return "UNKNOWN"
 
 # ===== ANALYSIS =====
 def analyze(coins):
@@ -159,9 +82,6 @@ def analyze(coins):
 
     for c in coins:
         try:
-            if not isinstance(c, dict):
-                continue
-
             cid = c.get("id")
             name = c.get("name")
             sym = c.get("symbol", "").upper()
@@ -172,9 +92,6 @@ def analyze(coins):
             if not cid or not price or not volume:
                 continue
 
-            rsi = cached_rsi(cid)
-            trend = get_trend(cid)
-
             p0 = last_price.get(cid)
             v0 = last_volume.get(cid)
 
@@ -183,19 +100,25 @@ def analyze(coins):
 
             score = 0
 
-            if 35 <= rsi <= 60: score += 2
-            elif rsi < 30: score += 1
-            elif rsi > 70: score -= 1
+            # SIMPLE BUT EFFECTIVE
+            if change > 5:
+                score += 1
+            if change > 10:
+                score += 2
 
-            if trend == "UPTREND": score += 2
-            else: score -= 1
+            if volume > 2_000_000:
+                score += 2
+            elif volume > 1_000_000:
+                score += 1
 
-            if price_jump > 1: score += 1
+            if price_jump > 1:
+                score += 1
 
-            if vol_jump > 10: score += 2
-            elif volume > 1_000_000: score += 1
+            if vol_jump > 10:
+                score += 2
 
-            if change > 30: score -= 2
+            if change > 30:
+                score -= 2
 
             if mode == "safe" and score < 5: continue
             if mode == "balanced" and score < 4: continue
@@ -207,18 +130,13 @@ def analyze(coins):
                 "symbol": sym,
                 "price": price,
                 "change": change,
-                "score": score,
-                "rsi": rsi,
-                "trend": trend
+                "score": score
             })
 
             last_price[cid] = price
             last_volume[cid] = volume
 
-            time.sleep(0.2)  # prevent API spam
-
-        except Exception as e:
-            print("Analyze error:", e)
+        except:
             continue
 
     return sorted(results, key=lambda x: x["score"], reverse=True)
@@ -235,7 +153,6 @@ def format_signals(signals):
 
         msg += f"{s['name']} ({s['symbol']})\n"
         msg += f"${s['price']} | {s['change']:.2f}%\n"
-        msg += f"RSI: {s['rsi']} | {s['trend']}\n"
         msg += f"Confidence: {conf}%\n\n"
 
     return msg
@@ -267,12 +184,6 @@ def handle(text, chat_id):
     elif text == "/resume":
         paused = False
         send("Resumed", chat_id)
-
-    elif text == "/history":
-        msg = "Recent Signals\n\n"
-        for h in history[-5:]:
-            msg += f"{h['coin']} @ {h['price']}\n"
-        send(msg, chat_id)
 
 # ===== MAIN LOOP =====
 print("BOT RUNNING...")
@@ -309,16 +220,9 @@ while True:
                     continue
 
                 broadcast(format_signals([s]))
-
-                history.append({
-                    "coin": s["symbol"],
-                    "price": s["price"],
-                    "time": now
-                })
-
                 last_alert[s["id"]] = now
 
-        time.sleep(10)
+        time.sleep(15)
 
     except Exception as e:
         print("CRASH:", e)
