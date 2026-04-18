@@ -24,8 +24,6 @@ last_volume = {}
 last_alert = {}
 last_update_id = None
 
-history = []
-
 # ===== CACHE =====
 market_cache = []
 market_cache_time = 0
@@ -37,8 +35,8 @@ def send(msg, chat_id):
             "chat_id": chat_id,
             "text": msg
         }, timeout=10)
-    except Exception as e:
-        print("Send error:", e)
+    except:
+        pass
 
 def broadcast(msg):
     for u in users:
@@ -53,8 +51,7 @@ def get_updates():
             params["offset"] = last_update_id + 1
 
         return requests.get(url, params=params, timeout=15).json().get("result", [])
-    except Exception as e:
-        print("Update error:", e)
+    except:
         return []
 
 # ===== MARKET =====
@@ -63,27 +60,18 @@ def get_market():
     params = {
         "vs_currency": "usd",
         "order": "volume_desc",
-        "per_page": 50,
+        "per_page": 30,
         "page": 1
     }
 
-    for _ in range(3):
-        try:
-            res = requests.get(url, params=params, timeout=15)
-
-            if res.status_code == 200:
-                data = res.json()
-                if isinstance(data, list):
-                    return data
-
-            elif res.status_code == 429:
-                print("⚠️ Rate limited, waiting...")
-                time.sleep(30)
-
-        except Exception as e:
-            print("Market error:", e)
-
-        time.sleep(5)
+    try:
+        res = requests.get(url, params=params, timeout=15)
+        if res.status_code == 200:
+            data = res.json()
+            if isinstance(data, list):
+                return data
+    except:
+        pass
 
     return []
 
@@ -122,35 +110,39 @@ def analyze(coins):
 
             score = 0
 
-            if change > 5:
-                score += 1
-            if change > 10:
-                score += 2
+            # 📈 PRICE CHANGE (granular)
+            if change > 3: score += 1
+            if change > 6: score += 1
+            if change > 10: score += 1
+            if change > 15: score += 1
 
-            if volume > 2_000_000:
-                score += 2
-            elif volume > 1_000_000:
-                score += 1
+            # 📊 VOLUME
+            if volume > 500_000: score += 1
+            if volume > 1_000_000: score += 1
+            if volume > 2_000_000: score += 1
 
-            if price_jump > 1:
-                score += 1
+            # ⚡ MOMENTUM
+            if price_jump > 0.5: score += 1
+            if price_jump > 1.5: score += 1
 
-            if vol_jump > 10:
-                score += 2
+            # 🔥 VOLUME SPIKE
+            if vol_jump > 5: score += 1
+            if vol_jump > 15: score += 1
 
+            # 🚫 OVEREXTENDED
             if change > 30:
                 score -= 2
 
-            # ===== FILTER =====
-            if mode == "safe" and score < 5: continue
-            if mode == "balanced" and score < 3: continue
-            if mode == "aggressive" and score < 2: continue
+            # ===== MODE FILTER =====
+            if mode == "safe" and score < 6: continue
+            if mode == "balanced" and score < 4: continue
+            if mode == "aggressive" and score < 3: continue
 
             # ===== TAG =====
             tag = "👀 WATCHLIST"
-            if score >= 5:
+            if score >= 8:
                 tag = "🚀 VERY STRONG"
-            elif score >= 4:
+            elif score >= 6:
                 tag = "🔥 STRONG"
 
             # ===== DECISION =====
@@ -182,8 +174,7 @@ def analyze(coins):
             last_price[cid] = price
             last_volume[cid] = volume
 
-        except Exception as e:
-            print("Analyze error:", e)
+        except:
             continue
 
     return sorted(results, key=lambda x: x["score"], reverse=True)
@@ -196,7 +187,7 @@ def format_signals(signals):
     msg = "🚀 MARKET SIGNALS\n\n"
 
     for s in signals[:5]:
-        conf = min(100, int((s["score"]/7)*100))
+        conf = min(100, 40 + s["score"] * 8)
 
         msg += f"{s['tag']}\n"
         msg += f"{s['name']} ({s['symbol']})\n"
@@ -277,7 +268,10 @@ while True:
                 if now - last < cooldown:
                     continue
 
-                broadcast(format_signals([s]))
+                msg = format_signals([s])
+                if msg:
+                    broadcast(msg)
+
                 last_alert[s["id"]] = now
 
         time.sleep(60)
