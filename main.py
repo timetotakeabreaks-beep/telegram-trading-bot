@@ -8,7 +8,7 @@ time.sleep(3)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
-    print("Missing BOT_TOKEN")
+    print("⚠️ Missing BOT_TOKEN")
     while True:
         time.sleep(60)
 
@@ -26,6 +26,10 @@ last_update_id = None
 
 history = []
 
+# ===== CACHE =====
+market_cache = []
+market_cache_time = 0
+
 # ===== TELEGRAM =====
 def send(msg, chat_id):
     try:
@@ -33,8 +37,8 @@ def send(msg, chat_id):
             "chat_id": chat_id,
             "text": msg
         }, timeout=10)
-    except:
-        pass
+    except Exception as e:
+        print("Send error:", e)
 
 def broadcast(msg):
     for u in users:
@@ -49,32 +53,42 @@ def get_updates():
             params["offset"] = last_update_id + 1
 
         return requests.get(url, params=params, timeout=15).json().get("result", [])
-    except:
+    except Exception as e:
+        print("Update error:", e)
         return []
 
-# ===== MARKET =====
+# ===== MARKET (WITH RETRY + BACKOFF) =====
 def get_market():
-    try:
-        url = "https://api.coingecko.com/api/v3/coins/markets"
-        params = {
-            "vs_currency": "usd",
-            "order": "volume_desc",
-            "per_page": 50,
-            "page": 1
-        }
-        res = requests.get(url, params=params, timeout=15)
+    url = "https://api.coingecko.com/api/v3/coins/markets"
+    params = {
+        "vs_currency": "usd",
+        "order": "volume_desc",
+        "per_page": 50,
+        "page": 1
+    }
 
-        if res.status_code != 200:
-            return []
+    for attempt in range(3):
+        try:
+            res = requests.get(url, params=params, timeout=15)
 
-        data = res.json()
-        if not isinstance(data, list):
-            return []
+            if res.status_code == 200:
+                data = res.json()
+                if isinstance(data, list):
+                    return data
 
-        return data
+            elif res.status_code == 429:
+                print("⚠️ Rate limited, waiting...")
+                time.sleep(30)
 
-    except:
-        return []
+            else:
+                print("API error:", res.status_code)
+
+        except Exception as e:
+            print("Request error:", e)
+
+        time.sleep(5)
+
+    return []
 
 # ===== ANALYSIS =====
 def analyze(coins):
@@ -100,7 +114,7 @@ def analyze(coins):
 
             score = 0
 
-            # SIMPLE BUT EFFECTIVE
+            # momentum scoring
             if change > 5:
                 score += 1
             if change > 10:
@@ -136,7 +150,8 @@ def analyze(coins):
             last_price[cid] = price
             last_volume[cid] = volume
 
-        except:
+        except Exception as e:
+            print("Analyze error:", e)
             continue
 
     return sorted(results, key=lambda x: x["score"], reverse=True)
@@ -167,10 +182,10 @@ def handle(text, chat_id):
         send("Bot ready 🚀", chat_id)
 
     elif text == "/scan":
-        send(format_signals(analyze(get_market())), chat_id)
+        send(format_signals(analyze(get_cached_market())), chat_id)
 
     elif text == "/top":
-        send(format_signals(analyze(get_market())[:5]), chat_id)
+        send(format_signals(analyze(get_cached_market())[:5]), chat_id)
 
     elif text.startswith("/mode"):
         if len(parts) > 1:
@@ -184,6 +199,18 @@ def handle(text, chat_id):
     elif text == "/resume":
         paused = False
         send("Resumed", chat_id)
+
+# ===== CACHE WRAPPER =====
+def get_cached_market():
+    global market_cache, market_cache_time
+
+    now = time.time()
+
+    if now - market_cache_time > 60:
+        market_cache = get_market()
+        market_cache_time = now
+
+    return market_cache
 
 # ===== MAIN LOOP =====
 print("BOT RUNNING...")
@@ -210,7 +237,8 @@ while True:
                 handle(text, chat_id)
 
         if not paused:
-            signals = analyze(get_market())
+            coins = get_cached_market()
+            signals = analyze(coins)
             now = time.time()
 
             for s in signals[:3]:
@@ -222,7 +250,7 @@ while True:
                 broadcast(format_signals([s]))
                 last_alert[s["id"]] = now
 
-        time.sleep(15)
+        time.sleep(60)
 
     except Exception as e:
         print("CRASH:", e)
